@@ -1,0 +1,573 @@
+---
+title: "GMM stocks returns clustering"
+author: "Francesco Dal Bello, Salvatore Coletta, Federico Giordano, Francesco Balascio"
+date: "2023-11-09"
+output:
+  pdf_document:
+     latex_engine: lualatex
+  html_document: default
+options:
+  warning: FALSE
+---
+
+```{r setup, include=FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(fig.width=20, fig.height=12)
+```
+
+```{r, message = FALSE}
+library(quantmod)
+library(ggplot2)
+library(dplyr)
+library(zoo)
+library(mclust)
+library(tidyr)
+library(teigen)
+library(NbClust)
+library(clusterSim)
+library(reshape2)
+```
+
+# Elaborazione dataset
+
+```{r}
+tickers <- c("SPY", "EFA", "EEM", "TLT", "LQD", "TIP", "^SPGSCI", "EURUSD=X", "JPY=X", "^VIX")
+
+start_date <- "2003-01-01"
+end_date <- "2023-12-14"
+
+# Scarica i dati e crea il dataframe
+stock_data <- NULL
+for (ticker in tickers) {
+  stock <- getSymbols(ticker, src = "yahoo", from = start_date, to = end_date, auto.assign = FALSE, periodicity = 'daily')
+  #stock_data <- cbind(stock_data, Ad(stock), Vo(stock))  # Aggiungi anche i volumi
+  stock_data <- cbind(stock_data, Ad(stock))
+}
+
+stock_data <- na.omit(stock_data)
+
+```
+
+## Calcolo dei rendimenti giornalieri
+
+```{r, message = FALSE}
+stock_data_returns <- data.frame(Date = index(stock_data))
+
+for (i in seq_along(colnames(stock_data))) {
+  price_col <- colnames(stock_data)[i]
+  returns_col <- paste(sub("_Adju.Close", "_Returns", price_col), sep = "_")
+  stock_data_returns[, returns_col] <- dailyReturn(Ad(stock_data[, i]))
+}
+
+# Imposta la colonna Date come indice
+stock_data_returns <- xts(stock_data_returns[, -1], order.by = stock_data_returns$Date)
+stock_data_returns <- stock_data_returns*100
+
+```
+
+# Analisi Descrittiva
+
+#### Il dataset utilizzato nella nostra analisi è di tipo finanziario ed è stato da noi accuratamente costruito tramite i dati disponibili sul sito Yahoo Finance.
+
+#### Abbiamo scelto di includere degli indici rappresentativi degli strumenti finanziari più signifiicativi sui mercati, al fine di avere un quadro dettagliato della situazione economico-finanziaria globale.
+
+#### La costruzione del dataset ha coinvolto un processo rigoroso di selezione e normalizzazione dei dati per garantire la coerenza e l'affidabilità delle informazioni. Abbiamo prestato particolare attenzione alla frequenza temporale dei dati, considerando rendimenti giornalieri per catturare le dinamiche a breve termine dei mercati.
+
+#### Il nostro obiettivo nell'analisi è quello di classificare in maniera più fedele possibile i vari regimi di mercato focalizzandoci sulla distinzione tra periodi rialzisti e fasi laterali.
+
+#### Le variabili scelte all'interno del dataset sono 11 indici di importanza rilevante e possono essere raggruppati a seconda della tipologia di strumento finanziario che rappresentano. Gli strumenti da noi considerati sono i seguenti:
+
+### Azioni (stocks): titolo finanziario che rappresenta le quote di proprietà in una o più società. Al titolare è conferito il diritto al voto e, se previsto, ha diritto al pagamento dei dividendi.
+
+### Obbligazioni (bonds): titolo di credito emesso da societa o enti pubblici che alla scadenza prefissata attribuisce al suo possessore il diritto al rimborso del capitale prestato più un interesse su tale somma;
+
+### Futures su materie: prime (commodity futures), contratto derivato di compravendita, a termine e standardizzato che ha come sottostante il valore di una qualsiasi materia prima, come ad esempio metalli, podotti agricoli, petrolio, ecc.;
+
+### Opzioni su azioni (equity options): contratto derivato di compravendita, a termine e standardizzato che ha come sottostante il valore di un'azione;
+
+### Denaro: forma più liquida di un investimento che include la valuta in circolazione e i depositi bancari.
+
+#### In particolare gli indici considerati sono i seguenti:
+
+### S&P 500: il più importante indice azionario statunitense, segue l'andamento di un paniere azionario formato dalle 500 aziende statunitensi a maggiore capitalizzazione, quotate al NYSE, AMEX, Nasdaq.
+
+### ETF EFA: Exchange Traded Fund che ha come obiettivo la replica della performance e delle caratteristiche dell'indice MSCI EAFE. Quest'ultimo è un indice che tiene conto della prestazione di una serie di società a media e larga capitalizzazione in tutto il mondo, escludendo USA e Canada.
+
+### ETF EEM: Exchange Traded Fund che ha come obiettivo la replica della performance e delle caratteristiche dell'indice MSCI Emerging Markets. Quest'ultimo è un indice che tiene valuta la prestazione di aziende presenti in economie emergenti come quella asiatica.
+
+### ETF TLT: Exchange Traded Fund che ha come obiettivo la replica della performance e delle caratteristiche dell'indice Barclays U.S. 20+ Year Treasury Bond Index. Tale indice valuta l'andamento delle obbligazioni pubbliche del tesoro degli USA a maturazione ventennale.
+
+### ETF LQD: exchange traded fund che ha come obiettivo la replica della performance e delle caratteristiche dell'indice Markit iBoxx USD Liquid Investment Grade. Tale indice valuta l'andamento dei bond corporate e 'investment grade' in vedita negli USA denominati in dollari.
+
+### ETF TIP: exchange traded fund che mira a replicare il più fedelmente possibile l'andamento di un indice composto da obbligazioni governatice indicizzate all'inflazione degli USA.
+
+### S&P GSCI: indice di riferimento delle materie prime che replica la performance del mercato globale delle commodity. E' composto da 24 contratti futures che coprono cinque diversi settori.
+
+### EUR/USD e USD/JPY: tassi di cambio rispettivamente tra euro e dollari statunitensi e tra dollari statunitensi e yen giapponesi.
+
+### VIX (Volatility Index): indice che rappresenta le aspettative di volatilità del mercato azionario basato sulle opzioni sull'indice S&P 500. La volatilità, ovvero la velocità di variazione dei prezzi, è spesso considerata un modo per misurare il sentiment del mercato, ed in particolare il grado di paura degli investitori.
+
+#### Le osservazioni nel nostro dataset sono rappresentate dai prezzi di chiusura, ovvero prezzi registrati al termine delle sessioni di contrattazione, dei vari indici nel periodo compreso tra 5 dicembre 2003 ed oggi. Abbiamo quindi scelto di standardizzare il dataset scegliendo di sostituire il prezzo di chiusura con i rendimenti giornalieri dei vari indici.
+
+```{r}
+for (ticker in colnames(stock_data)) {
+  plt = plot(stock_data[,ticker], main = ticker)
+  print(plt)
+}
+```
+
+```{r}
+library(zoo)
+
+for (ticker in colnames(stock_data_returns)) {
+  # Compute rolling mad
+  cc <- rollapply(stock_data_returns[, ticker], 60, mad, fill = NA, align = "right")
+  
+  
+  
+  # Plot the rolling Mean Absolute Deviation
+  print(plot(cc, type = "l", col = "blue", main = paste("Rolling MAD for", ticker)))
+}
+```
+
+
+```{r}
+library(zoo)
+
+rc <- plot(rollapply(stock_data_returns, width=60, function(x) cor(x[,1],x[,4]), by.column=FALSE), main="SPY & TLT 90gg corr")
+
+print(rc)
+
+rc2 <- plot(rollapply(stock_data_returns, width=60, function(x) cor(x[,1],x[,10]), by.column=FALSE), main="SPY & VIX 90gg corr")
+
+print(rc2)
+
+rc3 <- plot(rollapply(stock_data_returns, width=60, function(x) cor(x[,1],x[,6]), by.column=FALSE), main="SPY & TIP 90gg corr")
+
+print(rc)
+
+```
+
+# Analisi basata su distanze
+
+```{r}
+#STANDARDIZZATI#
+zstock<-scale(stock_data_returns)
+zmanhattan<-dist(zstock,"manhattan")
+zcanberra<-dist(zstock,"canberra")
+zeuclidea<-dist(zstock,"euclidean")
+```
+
+## Manhattan-Ward
+
+```{r, cache=TRUE}
+set.seed(123)
+Zmw<-NbClust(zstock,diss = zmanhattan,distance = NULL, method = "ward.D2",min.nc = 3, max.nc = 6)
+table(Zmw$Best.partition)
+
+medie_man_ward_z<-as.data.frame(cluster.Description(zstock,cl=Zmw$Best.partition)[,,1])
+
+medie_man_ward_z <- setNames(medie_man_ward_z, colnames(zstock))
+medie_man_ward_z$Cluster <- 1:nrow(medie_man_ward_z)
+medie_man_ward_z_long <- melt(medie_man_ward_z, id.vars = "Cluster")
+cluster_colors <- c("1" = "orange", "2" = "green", "3" = "blue", "4" = "red")
+
+istogramma_medie_man_ward_z<-ggplot(medie_man_ward_z_long, aes(x = variable, y = as.numeric(value), fill = factor(Cluster))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = cluster_colors) +
+  labs(title = "Media delle variabili per cluster(manhattan-ward)",
+       x = "Variabili",
+       y = "Media") +
+  #scale_fill_discrete(name = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1) 
+        
+  )
+
+istogramma_medie_man_ward_z
+```
+```{r}
+library(zoo)
+zmw_data <- data.frame(Date = index(stock_data), Cluster = Zmw$Best.partition)
+rownames(zmw_data) <- stock_data$Date
+
+merged_data_mw<-cbind(stock_data$SPY.Adjusted, zmw_data)
+colnames(merged_data_mw)<-c("SPY","clusters")
+
+
+plot_SPY_mw<- ggplot(merged_data_mw, aes(x = index(stock_data) , y = stock_data$SPY.Adjusted, group = 1, color = factor(clusters))) +
+  geom_path(linewidth = 1, alpha = 0.7) +
+  scale_color_manual(values = c("1" = "orange", "2" = "green", "3" = "blue", "4" = "red")) +
+  labs(x = "Data", y = "Chiusura SPY", title = "S&P 500 (manhattan-ward) ") +
+  theme_bw()
+plot_SPY_mw
+```
+
+
+
+## Canberra-Ward
+
+```{r, cache=TRUE}
+set.seed(123)
+Zcw<-NbClust(zstock,diss = zcanberra,distance = NULL, method = "ward.D2", min.nc = 3, max.nc = 6)
+
+
+table(Zcw$Best.partition)
+
+medie_can_ward_z<-as.data.frame(cluster.Description(zstock,cl =Zcw$Best.partition)[,,1])
+
+medie_can_ward_z<-setNames(medie_can_ward_z,colnames(zstock))
+medie_can_ward_z$Cluster <- 1:nrow(medie_can_ward_z)
+medie_can_ward_z_long <- melt(medie_can_ward_z, id.vars = "Cluster")
+
+istogramma_medie_can_ward_z<-ggplot(medie_can_ward_z_long, aes(x = variable, y = as.numeric(value), fill = factor(Cluster))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("1" = "orange", "2" = "green", "3" = "red")) +
+  labs(title = "Media delle variabili per cluster(canberra-ward)",
+       x = "Variabili",
+       y = "Media") +
+  #scale_fill_discrete(name = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1) 
+        
+  )
+istogramma_medie_can_ward_z
+```
+
+```{r}
+zcw_data <- data.frame(Date = index(stock_data), Cluster = Zcw$Best.partition)
+rownames(zcw_data) <- stock_data$Date
+
+
+merged_data_cw<-cbind(stock_data$SPY.Adjusted, zcw_data)
+merged_data_cw<-setNames(merged_data_cw,c("SPY","clusters"))
+
+plot_SPY_cw<-ggplot(merged_data_cw, aes(x = Index , y = stock_data$SPY.Adjusted, group = 1, color = factor(clusters))) +
+  geom_path(linewidth = 1, alpha = 0.7) +
+  scale_color_manual(values = c("1" = "orange", "2" = "green", "3" = "red")) +
+  labs(x = "Data", y = "Chiusura SPY", title = "S&P 500 (canberra-ward)") +
+  theme_bw()
+plot_SPY_cw
+```
+
+
+## Euiclidea-Ward
+
+```{r, cache=TRUE}
+Zew<-NbClust(zstock,diss = zeuclidea, distance= NULL, method = "ward.D2", min.nc = 3, max.nc = 6)
+table(Zew$Best.partition)
+
+
+
+medie_euc_ward_z<-as.data.frame(cluster.Description(zstock,cl =Zew$Best.partition)[,,1])
+
+medie_euc_ward_z<-setNames(medie_euc_ward_z,colnames(zstock))
+medie_euc_ward_z$Cluster <- 1:nrow(medie_euc_ward_z)
+medie_euc_ward_z_long <- melt(medie_euc_ward_z, id.vars = "Cluster")
+
+ggplot(medie_euc_ward_z_long, aes(x = variable, y = as.numeric(value), fill = factor(Cluster))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  #ylim
+  labs(title = "Media delle variabili per cluster(euclidea-ward)",
+       x = "Variabili",
+       y = "Media") +
+  scale_fill_manual(values = c("1" = "orange", "2" = "green", "3" = "blue", "4" = "red")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1) 
+        
+  )
+```
+
+```{r, cache=TRUE}
+
+```
+
+```{r}
+table(Zcw$Best.partition,Zmw$Best.partition)
+```
+
+```{r}
+adjustedRandIndex(Zcw$Best.partition,napoli)
+adjustedRandIndex(Zcw$Best.partition,Zmw$Best.partition)
+adjustedRandIndex(napoli,Zmw$Best.partition)
+```
+
+# Analisi basata su misture gaussiane
+
+```{r, cache = TRUE}
+set.seed(123)
+BIC <- mclustBIC(stock_data_returns)
+plot(BIC)
+summary(BIC)
+```
+
+#### Una prima analisi suggerisce 9 componenti ma in virtù del principio di parsimonia e dopo aver svolto numerosi test, scegliamo G=3 e scegliamo il modello VEV nonostante anche il VVV porti a risultati pressochè identici.
+
+```{r, cache = TRUE}
+BIC <- mclustBIC(stock_data_returns)
+summary(BIC)
+```
+
+#### Il numero di componenti è supportato anche dall'analisi mediante LRT (con bootsrap)
+
+```{r, cache = TRUE}
+#LRT <- mclustBootstrapLRT(stock_data_returns, maxG = 4, modelName = "VEV")
+```
+
+#### Anche questo test suggerisce 3 componenti invece che 4
+
+#### Verifica con starting point multipli:
+
+```{r, cache = TRUE}
+BIC_multipli <- NULL
+for(j in 1:50) {
+  rBIC <- mclustBIC(stock_data_returns,
+
+                    verbose = FALSE, 
+                    initialization = 
+                      list(hcPairs =
+                             hcRandomPairs(stock_data_returns)))
+  BIC_multipli <- mclustBICupdate(BIC_multipli, rBIC)
+} 
+summary(BIC_multipli)
+plot(BIC_multipli)
+```
+
+#### Le classificazioni ottenute sono di seguito rappresentate:
+
+```{r}
+mod1 <- Mclust(stock_data_returns, x = BIC_multipli, modelNames = "VEV", G=3)
+summary(mod1, parameters = TRUE)
+```
+
+#### Le probabilità a posteriori forniscono un idea più precisa del comportamento del modello:
+
+```{r, cache = TRUE}
+zprob <- round(mod1$z,4 )
+#cluster con prob a posteriori
+clusters_zprob <- data.frame(Date = index(stock_data), zprob)
+colnames(clusters_zprob) <- c("Date", "Regime1", "Regime2", "Regime3")
+
+# Aggrega i dati per mese e calcola la probabilità media ponderata
+clusters_zprob_aggregated <- clusters_zprob %>%
+  mutate(YearMonth = as.yearmon(Date)) %>%
+  group_by(YearMonth) %>%
+  summarise(
+    Weighted_Regime1 = weighted.mean(Regime1, na.rm = TRUE),
+    Weighted_Regime2 = weighted.mean(Regime2, na.rm = TRUE),
+    Weighted_Regime3 = weighted.mean(Regime3, na.rm = TRUE)
+  )
+
+
+long_clusters <- clusters_zprob_aggregated %>%
+  pivot_longer(cols = starts_with("Weighted_Regime"), 
+               names_to = "Regime", 
+               values_to = "Weighted_Value")
+
+
+my_colors <- c("Weighted_Regime1" = "orange", "Weighted_Regime2" = "green", "Weighted_Regime3" = "red")
+
+ggplot(long_clusters, aes(fill=Regime, y=Weighted_Value, x=YearMonth)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_fill_manual(values = my_colors)
+```
+
+
+```{r}
+zprob <- round(mod1$z,4 )
+zprob_soglia <- c()
+for (i in 1:3){
+  zprob_soglia[i] <- length(as.numeric(which(zprob[,i]>=0.75)))
+}
+
+zprob_soglia/table(mod1$classification)*100
+```
+
+```{r, cache = TRUE}
+clusters <- mod1$classification
+clusters_data <- data.frame(Date = index(stock_data), Cluster = clusters)
+
+merged_data <- cbind(stock_data$SPY.Adjusted, clusters_data$Cluster)
+
+
+
+filtered_data <- subset(merged_data, index(merged_data) >= as.Date("2007-01-01") & index(merged_data) <= as.Date("2010-12-31"))
+
+# Crea il grafico ggplot solo per i dati filtrati
+ggplot(merged_data, aes(x = Index, y = SPY.Adjusted, group = 1, color = factor(clusters_data.Cluster))) +
+  geom_path(size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("1" = "red", "2" = "green", "3" = "orange")) +
+  labs(x = "Data", y = "Chiusura SPY", title = "S&P 500 daily") +
+  theme_bw()
+```
+
+```{r}
+table(Zmw$Best.partition, mod1$classification)
+adjustedRandIndex(Zmw$Best.partition, mod1$classification)
+```
+
+# Analisi basata su misture t-student
+
+```{r, message = FALSE}
+library(teigen)
+
+# "Soft random" sv
+set.seed(13)
+teigen_soft <- teigen(stock_data_returns, Gs = 2:6, init = "soft", verbose = TRUE, models="all")
+
+```
+
+```{r, cache = TRUE}
+# k-means starting values
+teigen_k <- teigen(stock_data_returns, Gs = 2:4, verbose = TRUE)
+```
+
+```{r, cache = TRUE}
+teigen_emem <- teigen(stock_data_returns,  Gs = 2:5, 
+                      init = "emem",  ememargs =
+                        list(numstart = 100, iter = 5,
+                             model = "CUUU", init = "soft"),
+                      verbose = TRUE)
+
+```
+
+```{r, cache = TRUE}
+# Hierarchical sv
+hbank <- hclust(dist(scale(stock_data_returns))) 
+initial <- lapply(1:5, function(i) cutree(hbank, k = i))
+teigen_hier <- teigen(stock_data_returns, Gs = 2:5,
+                      init = initial, 
+                      verbose = TRUE)
+```
+
+```{r}
+teigen_soft$bestmodel
+teigen_soft$iclresults$bestmodel
+
+teigen_k$bestmodel
+teigen_k$iclresults$bestmodel
+
+#teigen_hard$bestmodel
+#teigen_hard$iclresults$bestmodel
+
+teigen_hier$bestmodel
+teigen_hier$iclresults$bestmodel
+
+teigen_emem$bestmodel
+teigen_emem$iclresults$bestmodel
+```
+
+#### Escludendo i risultati con ICL G=1 (in quanto non rilevanti), otteniamo 3/4 risultati suggerenti G=3 componenti (come confermato dal modello scelto a misture finite gaussiane).
+
+```{r}
+t(teigen_soft$parameters$mean)
+t(teigen_k$parameters$mean)
+t(teigen_emem$parameters$mean)
+
+```
+
+```{r}
+table(teigen_soft$classification)
+table(teigen_k$classification)
+table(teigen_emem$classification)
+
+```
+
+```{r, cache = TRUE, message = FALSE}
+#EDIT QUI PER IL MOD
+clusters_data_t <- data.frame(Date = index(stock_data), Cluster = teigen_emem$classification)
+rownames(clusters_data_t) <- index(stock_data)
+
+merged_data_t <- cbind(stock_data$SPY.Adjusted, clusters_data_t$Cluster)
+
+
+# Filtra i dati dal 2018 ad oggi
+#filtered_data_t <- subset(merged_data_t, index(merged_data_t) >= as.Date("2020-01-01"))
+filtered_data_t <- subset(merged_data_t, index(merged_data_t) >= as.Date("2007-01-01") & index(merged_data_t) <= as.Date("2010-12-31"))
+
+
+# Crea il grafico ggplot solo per i dati filtrati
+ggplot(merged_data_t, aes(x = Index, y = SPY.Adjusted, group = 1, color = factor(clusters_data_t.Cluster))) +
+  geom_path(size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("1" = "orange", "2" = "red", "3" = "green")) +
+  labs(x = "Data", y = "Chiusura SPY", title = "S&P 500 daily - K-emem t-student") +
+  theme_bw()
+
+```
+
+```{r, cache = TRUE, message = FALSE}
+#EDIT QUI PER IL MOD
+zprob_t <- round(teigen_emem$fuzzy,4 )
+#cluster con prob a posteriori
+clusters_zprob_t <- data.frame(Date = index(stock_data), zprob_t)
+colnames(clusters_zprob_t) <- c("Date", "Regime1", "Regime2", "Regime3")
+
+# Aggrega i dati per mese e calcola la probabilità media ponderata
+clusters_zprob_aggregated_t <- clusters_zprob_t %>%
+  mutate(YearMonth = as.yearmon(Date)) %>%
+  group_by(YearMonth) %>%
+  summarise(
+    Weighted_Regime1 = weighted.mean(Regime3, na.rm = TRUE),
+    Weighted_Regime2 = weighted.mean(Regime2, na.rm = TRUE),
+    Weighted_Regime3 = weighted.mean(Regime1, na.rm = TRUE)
+  )
+
+
+long_clusters_t <- clusters_zprob_aggregated_t %>%
+  pivot_longer(cols = starts_with("Weighted_Regime"), 
+               names_to = "Regime", 
+               values_to = "Weighted_Value")
+
+
+my_colors <- c("Weighted_Regime1" = "green", "Weighted_Regime2" = "red", "Weighted_Regime3" = "orange")
+
+ggplot(long_clusters_t, aes(fill=Regime, y=Weighted_Value, x=YearMonth)) + 
+  geom_bar(position="fill", stat="identity") +
+  scale_fill_manual(values = my_colors)
+```
+
+```{r}
+table_confronto <- table(mod1$classification, teigen_k$classification)
+rownames(table_confronto) <- c("G1", "G2", "G3")
+colnames(table_confronto) <- c("ts1", "ts2", "ts3")
+table_confronto
+```
+
+```{r}
+barplot(t(table_confronto), legend=c("T1", "T2", "T3"))
+```
+
+```{r}
+zprob_t <- round(teigen_k$fuzzy,4 )
+zprob_t_soglia <- c()
+for (i in 1:3){
+  zprob_t_soglia[i] <- length(as.numeric(which(zprob_t[,i]>=0.75)))
+}
+
+zprob_t_soglia/table(teigen_k$classification)*100
+```
+
+# Confronto finale gaussiane e t-student
+
+```{r, cache = TRUE, message = FALSE}
+# Per paragonare i risultati di teigen con quelli d un GMM
+# dobbiamo usare la stessa inizializzazione livello di tolleranza e criterio di convergenza
+# che usa  Mclust. Quindi, stimiamo nuovamente teigen e  Mclust.
+sdata <- scale(stock_data_returns)
+mclustinit <- list()
+hcfit <- hcVVV(data = sdata)
+for(i in 1:5) {
+  mclustinit[[i]] <- hclass(hcfit, i)
+}
+fitt <- teigen(sdata, Gs = 3, init = mclustinit,
+               convstyle = "lop",
+               eps = c(sqrt(.Machine$double.eps),
+                       1.e-5), verbose = TRUE)
+summary(fitt)
+fitg <- Mclust(sdata, G = 3, 
+               initialization = list(hcfit))
+summary(fitg)
+table(fitt$classification, fitg$classification)
+round(adjustedRandIndex(fitt$classification, 
+                        fitg$classification),2)
+```
